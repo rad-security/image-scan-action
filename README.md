@@ -1,98 +1,96 @@
 # RAD Image Scan Action
 
 ![GitHub release (latest by date)](https://img.shields.io/github/v/release/rad-security/image-scan-action)
-![Hex.pm](https://img.shields.io/hexpm/l/apa)
 
-RAD scans for CVEs in your images as part of your GitHub Actions CI workflow.
+Scans container images for vulnerabilities using [Grype](https://github.com/anchore/grype). When configured with [RAD Security](https://rad.security) credentials, the report is enriched with data about the same image as it is *currently deployed* in your fleet — vulnerability count deltas vs deployed instances, regression detection, and distro EOL warnings.
 
-This action is using Grype to scan for CVEs in given image.
+This action wraps [`rad-image-scanner`](https://github.com/rad-security/image-scanner).
 
-## Example Usage
-
-Build a local image and scan it for CVEs. It will fail the workflow if any CVE with `medium` severity is found. It will ignore CVEs with IDs `CVE-2021-1234` and `CVE-2021-5678`. Default output format will be used (`table`) which will be printed to the standard output of the action.
+## Plain (Grype-only) usage
 
 ```yaml
-name: rad-image-scan
+- name: Build local image
+  uses: docker/build-push-action@v6
+  with:
+    tags: localbuild/testimage:latest
+    push: false
+    load: true
 
-on:
-  pull_request:
-
-jobs:
-  rad-image-scan:
-    permissions:
-      # only required for workflows in private repositories
-      actions: read
-      contents: read
-    runs-on: ubuntu-latest
-    steps:
-      - name: Build Local Container
-        uses: docker/build-push-action@v4
-        with:
-          tags: localbuild/testimage:latest
-          push: false
-          load: true
-      - name: RAD Image Scan
-        uses: rad-security/image-scan-action@v0.0.1
-        with:
-          fail_on_severity: medium
-          ignore_cves: |
-            CVE-2021-1234
-            CVE-2021-5678
-          image: localbuild/testimage:latest
+- name: Scan image
+  uses: rad-security/image-scan-action@v1
+  with:
+    image: localbuild/testimage:latest
+    fail_on_severity: medium
+    ignore_cves: |
+      CVE-2021-1234
+      CVE-2021-5678
 ```
 
-This action also supports SARIF output format. Note the additional permission `security-events: write` which is required to upload security report.
+## RAD-enriched usage
+
+Add your RAD access key and account IDs. Credentials must be passed via `env:` (not `with:`) so they are not echoed to workflow logs.
 
 ```yaml
-name: rad-image-scan
+- name: Scan image with RAD enrichment
+  uses: rad-security/image-scan-action@v1
+  env:
+    RAD_ACCESS_KEY_ID: ${{ secrets.RAD_ACCESS_KEY_ID }}
+    RAD_SECRET_KEY:    ${{ secrets.RAD_SECRET_KEY }}
+  with:
+    image: ghcr.io/example/svc:v1.2.3
+    format: sarif
+    rad_account_ids: acct_1,acct_2
+    rad_fail_on_regression: critical
+    rad_fail_on_eol: "true"
 
-on:
-  pull_request:
+- name: Upload SARIF
+  if: success() || failure()
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: ${{ steps.scan.outputs.sarif }}
 
-jobs:
-  rad-image-scan:
-    permissions:
-      # required for all workflows
-      security-events: write
-      # only required for workflows in private repositories
-      actions: read
-      contents: read
-    runs-on: ubuntu-latest
-    steps:
-      - name: Build Local Container
-        uses: docker/build-push-action@v4
-        with:
-          tags: localbuild/testimage:latest
-          push: false
-          load: true
-      - name: RAD Image Scan
-        id: scan
-        uses: rad-security/image-scan-action@v0.0.1
-        with:
-          fail_on_severity: medium
-          format: sarif
-          ignore_cves: |
-            CVE-2021-1234
-            CVE-2021-5678
-          image: localbuild/testimage:latest
-      - name: Upload Image Scan SARIF Report
-        if: success() || failure()
-        uses: github/codeql-action/upload-sarif@v2
-        with:
-          sarif_file: ${{ steps.scan.outputs.sarif }}
+- name: Upload RAD report
+  if: success() || failure()
+  uses: actions/upload-artifact@v4
+  with:
+    name: rad-report
+    path: ${{ steps.scan.outputs.rad_report }}
 ```
+
+When `format: sarif`, the RAD enrichment is injected into the SARIF document under `runs[].properties.rad` (toggle with `rad_annotate_sarif: false`).
 
 ## Inputs
 
-- `fail_on_severity`: The severity level that will cause the action to fail. If not provided, the action doesn't fail. Possible values are `negligible`, `low`, `medium`, `high` and `critical`.
-- `format`: The output format of the action. Possible values are `table` and `sarif`. If not provided, the default value is `table`.
-- `ignore_cves`: A multiline string of CVEs to ignore. Each line should contain a single CVE ID. If not provided, no CVEs will be ignored.
-- `image`: The image to scan. This is a required input.
+| Input | Description |
+|---|---|
+| `image` | Image to scan. Required unless `sbom` is set. |
+| `sbom` | Path to a Syft JSON SBOM. Used instead of `image`. |
+| `format` | `table` (default) \| `json` \| `sarif` \| `cyclonedx`. |
+| `fail_on_severity` | Grype gate: `negligible` \| `low` \| `medium` \| `high` \| `critical`. |
+| `ignore_cves` | Multiline list of CVE IDs to ignore. |
+| `rad_account_ids` | Comma-separated account IDs. Triggers RAD enrichment when set. |
+| `rad_fail_on_regression` | `critical` \| `high` \| `medium` \| `low` \| `any`. Fails the workflow if the new scan adds vulnerabilities at this severity or higher vs any deployed instance. |
+| `rad_fail_on_eol` | Set to `true` to fail the workflow if the scanned image is built on an end-of-life distro. |
+| `rad_api_url` | Override the RAD API base URL (default `https://api.rad.security`). |
+| `rad_report` | Path for the RAD enrichment JSON (default `rad-report.json`). |
+| `rad_annotate_sarif` | When `format: sarif`, inject the RAD report into the SARIF document. Default `true`. |
 
 ## Outputs
 
-- `sarif`: Location of the SARIF output file of the action. This output is only available if `format` input is set to `sarif`.
+| Output | When set | Description |
+|---|---|---|
+| `sarif` | `format: sarif` | Path to the SARIF report. |
+| `rad_report` | `rad_account_ids` set | Path to the RAD enrichment JSON. |
 
-## Contributing
+## Credentials
 
-Guard Action is Apache 2.0 licensed and accepts contributions via GitHub pull requests. See the [CONTRIBUTING](CONTRIBUTING.md) file for details.
+`RAD_ACCESS_KEY_ID` and `RAD_SECRET_KEY` must be supplied via the workflow's `env:` block (typically from `secrets`). They are intentionally not exposed as Action inputs.
+
+## Breaking changes from v0.x
+
+- New action major version. v0.x flags `fail_on_severity`, `ignore_cves`, `image`, `format` are preserved; everything else is new.
+- Output format `table` now uses grype's native table format, not the legacy template.
+
+## License
+
+Apache-2.0. Grype is © Anchore, Inc., distributed under Apache-2.0.

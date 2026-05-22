@@ -1,33 +1,66 @@
 name: RAD Image Scan
-description: RAD scans for CVEs in your images as part of your GitHub Actions CI workflow.
-author: RAD
+description: Scan container images for vulnerabilities and enrich the report with currently-deployed image data from RAD Security.
+author: RAD Security
 branding:
   icon: alert-triangle
   color: green
 
 inputs:
-  fail_on_severity:
-    required: false
-    description: "The severity level at which to fail the workflow. Valid values are: negligible, low, medium, high, critical."
-  format:
-    required: false
-    description: "The format of the output. Valid values are: table, sarif."
-    default: table
-  ignore_cves:
-    required: false
-    description: "List of CVEs to ignore."
   image:
     required: false
-    description: "Image to scan."
+    description: "Image to scan (e.g. registry.example.com/foo/bar:v1). Required unless 'sbom' is set."
+  sbom:
+    required: false
+    description: "Path to a Syft JSON SBOM to scan instead of an image."
+  format:
+    required: false
+    description: "Output format passed to grype: table | json | sarif | cyclonedx."
+    default: table
+  fail_on_severity:
+    required: false
+    description: "Fail the workflow if any vulnerability at this severity or higher is found. Values: negligible | low | medium | high | critical."
+  ignore_cves:
+    required: false
+    description: "Multiline list of CVE IDs to ignore. One per line."
+  rad_account_ids:
+    required: false
+    description: "Comma-separated RAD account IDs to query. Required for RAD enrichment. Without this input the action behaves as pure grype."
+  rad_fail_on_regression:
+    required: false
+    description: "Fail the workflow if the new scan adds vulnerabilities at this severity or higher vs any currently-deployed instance. Values: critical | high | medium | low | any."
+  rad_fail_on_eol:
+    required: false
+    description: "Set to 'true' to fail the workflow if the scanned image is built on an end-of-life distro."
+  rad_api_url:
+    required: false
+    description: "Override the RAD API base URL. Defaults to https://api.rad.security."
+  rad_report:
+    required: false
+    description: "Path where the RAD enrichment JSON report should be written."
+    default: rad-report.json
+  rad_annotate_sarif:
+    required: false
+    description: "When format=sarif, inject the RAD report under runs[].properties.rad."
+    default: "true"
+
 outputs:
   sarif:
-    description: "Path to a SARIF report file for the image"
+    description: "Path to the SARIF report (only set when format=sarif)."
+  rad_report:
+    description: "Path to the RAD enrichment JSON report (only set when RAD credentials are configured)."
 
 runs:
   using: docker
   image: Dockerfile
   env:
-    FAIL_ON_SEVERITY: ${{ inputs.fail_on_severity }}
-    FORMAT: ${{ inputs.format }}
-    IGNORE_CVES: ${{ inputs.ignore_cves }}
     IMAGE: ${{ inputs.image }}
+    SBOM: ${{ inputs.sbom }}
+    FORMAT: ${{ inputs.format }}
+    FAIL_ON_SEVERITY: ${{ inputs.fail_on_severity }}
+    IGNORE_CVES: ${{ inputs.ignore_cves }}
+    RAD_ACCOUNT_IDS: ${{ inputs.rad_account_ids }}
+    RAD_FAIL_ON_REGRESSION: ${{ inputs.rad_fail_on_regression }}
+    RAD_FAIL_ON_EOL: ${{ inputs.rad_fail_on_eol }}
+    RAD_API_URL: ${{ inputs.rad_api_url }}
+    RAD_REPORT: ${{ inputs.rad_report }}
+    RAD_ANNOTATE_SARIF: ${{ inputs.rad_annotate_sarif }}
