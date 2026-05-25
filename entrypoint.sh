@@ -1,36 +1,86 @@
-#!/bin/sh -l
+#!/bin/sh
+set -eu
 
-SARIF_OUTPUT_FILE_NAME="./sarif_output.json"
+# --- Translate inputs to CLI args ------------------------------------------
 
-[ -z ${FAIL_ON_SEVERITY} ] || PARAM_FAIL_ON_SEVERITY="-f ${FAIL_ON_SEVERITY}"
+# Reject newlines in inputs that are echoed to $GITHUB_OUTPUT, to avoid
+# GitHub Actions output injection (CWE-93).
+reject_newline() {
+  case "$2" in
+    *"
+"*)
+      echo "input '$1' must not contain newlines" >&2
+      exit 2
+      ;;
+  esac
+}
 
-# Handle "table" and "sarif" output formats.
-if [ "${FORMAT}" = "table" ]; then
-  PARAM_FORMAT="-o template -t /output_with_summary.tmpl"
-elif [ "${FORMAT}" = "sarif" ]; then
-  PARAM_FORMAT="-o sarif --file $SARIF_OUTPUT_FILE_NAME"
-  echo "sarif=$SARIF_OUTPUT_FILE_NAME" >> $GITHUB_OUTPUT
+# Build the scanner argv as positional params so each value occupies a single
+# slot — no word-splitting of a concatenated string, so inputs cannot smuggle
+# extra flags (CWE-88).
+set --
+
+# Output format (table | json | sarif | cyclonedx).
+SARIF_FILE=""
+case "${FORMAT:-table}" in
+  sarif)
+    SARIF_FILE="./sarif_output.json"
+    set -- "$@" -o sarif --file "$SARIF_FILE"
+    echo "sarif=$SARIF_FILE" >> "$GITHUB_OUTPUT"
+    ;;
+  json|cyclonedx|table)
+    set -- "$@" -o "${FORMAT}"
+    ;;
+  *)
+    echo "unknown format: $FORMAT" >&2
+    exit 2
+    ;;
+esac
+
+# Grype fail-on severity (independent of RAD regression gate).
+if [ -n "${FAIL_ON_SEVERITY:-}" ]; then
+  set -- "$@" --fail-on "${FAIL_ON_SEVERITY}"
 fi
 
-# Ignoring CVEs requires a config file.
-if [ ! -z "${IGNORE_CVES}" ]; then
-  echo "ignore:" > /config.yaml
-  echo "Ignored CVEs:"
-  for cve in ${IGNORE_CVES}; do
-    echo "  - vulnerability: $cve" >> /config.yaml
-    echo " - $cve"
+# Ignore-CVE list: grype takes this via a config file.
+if [ -n "${IGNORE_CVES:-}" ]; then
+  CONFIG=/tmp/grype-config.yaml
+  echo "ignore:" > "$CONFIG"
+  echo "$IGNORE_CVES" | while IFS= read -r cve; do
+    [ -z "$cve" ] && continue
+    echo "  - vulnerability: $cve" >> "$CONFIG"
   done
-  PARAM_CONFIG="-c /config.yaml"
+  set -- "$@" -c "$CONFIG"
 fi
 
-/grype --add-cpes-if-none ${PARAM_FORMAT} ${PARAM_CONFIG} ${PARAM_FAIL_ON_SEVERITY} ${IMAGE}
-exit_code=$?
-
-# Add RAD Image Scan reference to the SARIF report.
-if [ "${FORMAT}" = "sarif" ]; then
-  tmp=$(mktemp)
-  jq '.runs[].tool.driver.name = "RAD Image Scan using Grype"' $SARIF_OUTPUT_FILE_NAME > "$tmp" && mv "$tmp" $SARIF_OUTPUT_FILE_NAME
-  chmod 644 $SARIF_OUTPUT_FILE_NAME
+# RAD enrichment flags. RAD_ACCESS_KEY_ID and RAD_SECRET_KEY are passed via
+# the workflow's `env:` block — we don't accept them as `inputs:` because
+# Actions inputs are visible in workflow logs.
+if [ -n "${RAD_ACCOUNT_IDS:-}" ]; then
+  if [ -n "${RAD_FAIL_ON_REGRESSION:-}" ]; then
+    set -- "$@" --rad-fail-on-regression "${RAD_FAIL_ON_REGRESSION}"
+  fi
+  if [ "${RAD_FAIL_ON_EOL:-}" = "true" ]; then
+    set -- "$@" --rad-fail-on-eol
+  fi
+  if [ -n "${RAD_REPORT:-}" ]; then
+    reject_newline rad_report "${RAD_REPORT}"
+    set -- "$@" --rad-report "${RAD_REPORT}"
+    echo "rad_report=${RAD_REPORT}" >> "$GITHUB_OUTPUT"
+  fi
+  if [ "${FORMAT}" = "sarif" ] && [ "${RAD_ANNOTATE_SARIF:-true}" = "true" ]; then
+    set -- "$@" --rad-annotate-sarif
+  fi
 fi
 
-exit $exit_code
+# Target: image ref or sbom:path. Image takes precedence.
+if [ -n "${IMAGE:-}" ]; then
+  TARGET="${IMAGE}"
+elif [ -n "${SBOM:-}" ]; then
+  TARGET="sbom:${SBOM}"
+else
+  echo "either 'image' or 'sbom' input is required" >&2
+  exit 2
+fi
+
+exec /usr/local/bin/rad-image-scanner "$@" "${TARGET}"
