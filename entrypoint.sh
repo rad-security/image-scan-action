@@ -3,18 +3,33 @@ set -eu
 
 # --- Translate inputs to CLI args ------------------------------------------
 
-ARGS=""
+# Reject newlines in inputs that are echoed to $GITHUB_OUTPUT, to avoid
+# GitHub Actions output injection (CWE-93).
+reject_newline() {
+  case "$2" in
+    *"
+"*)
+      echo "input '$1' must not contain newlines" >&2
+      exit 2
+      ;;
+  esac
+}
+
+# Build the scanner argv as positional params so each value occupies a single
+# slot — no word-splitting of a concatenated string, so inputs cannot smuggle
+# extra flags (CWE-88).
+set --
 
 # Output format (table | json | sarif | cyclonedx).
 SARIF_FILE=""
 case "${FORMAT:-table}" in
   sarif)
     SARIF_FILE="./sarif_output.json"
-    ARGS="$ARGS -o sarif --file $SARIF_FILE"
+    set -- "$@" -o sarif --file "$SARIF_FILE"
     echo "sarif=$SARIF_FILE" >> "$GITHUB_OUTPUT"
     ;;
   json|cyclonedx|table)
-    ARGS="$ARGS -o ${FORMAT}"
+    set -- "$@" -o "${FORMAT}"
     ;;
   *)
     echo "unknown format: $FORMAT" >&2
@@ -24,7 +39,7 @@ esac
 
 # Grype fail-on severity (independent of RAD regression gate).
 if [ -n "${FAIL_ON_SEVERITY:-}" ]; then
-  ARGS="$ARGS --fail-on ${FAIL_ON_SEVERITY}"
+  set -- "$@" --fail-on "${FAIL_ON_SEVERITY}"
 fi
 
 # Ignore-CVE list: grype takes this via a config file.
@@ -35,7 +50,7 @@ if [ -n "${IGNORE_CVES:-}" ]; then
     [ -z "$cve" ] && continue
     echo "  - vulnerability: $cve" >> "$CONFIG"
   done
-  ARGS="$ARGS -c $CONFIG"
+  set -- "$@" -c "$CONFIG"
 fi
 
 # RAD enrichment flags. RAD_ACCESS_KEY_ID and RAD_SECRET_KEY are passed via
@@ -43,17 +58,18 @@ fi
 # Actions inputs are visible in workflow logs.
 if [ -n "${RAD_ACCOUNT_IDS:-}" ]; then
   if [ -n "${RAD_FAIL_ON_REGRESSION:-}" ]; then
-    ARGS="$ARGS --rad-fail-on-regression ${RAD_FAIL_ON_REGRESSION}"
+    set -- "$@" --rad-fail-on-regression "${RAD_FAIL_ON_REGRESSION}"
   fi
   if [ "${RAD_FAIL_ON_EOL:-}" = "true" ]; then
-    ARGS="$ARGS --rad-fail-on-eol"
+    set -- "$@" --rad-fail-on-eol
   fi
   if [ -n "${RAD_REPORT:-}" ]; then
-    ARGS="$ARGS --rad-report ${RAD_REPORT}"
+    reject_newline rad_report "${RAD_REPORT}"
+    set -- "$@" --rad-report "${RAD_REPORT}"
     echo "rad_report=${RAD_REPORT}" >> "$GITHUB_OUTPUT"
   fi
   if [ "${FORMAT}" = "sarif" ] && [ "${RAD_ANNOTATE_SARIF:-true}" = "true" ]; then
-    ARGS="$ARGS --rad-annotate-sarif"
+    set -- "$@" --rad-annotate-sarif
   fi
 fi
 
@@ -67,5 +83,4 @@ else
   exit 2
 fi
 
-# shellcheck disable=SC2086
-exec /usr/local/bin/rad-image-scanner ${ARGS} "${TARGET}"
+exec /usr/local/bin/rad-image-scanner "$@" "${TARGET}"
